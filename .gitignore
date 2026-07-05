@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+tf-env/
+.env
+.venv
+.idea
+
+# VS Code
+.vscode/
+
+# TensorFlow logs
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+uploads/
+static/
+
+model/
