@@ -1,3 +1,4 @@
+# from huggingface_hub import hf_hub_download
 import os
 import uuid
 
@@ -7,12 +8,8 @@ import tensorflow as tf
 
 from utils.storage_utils import upload_file, upload_image
 
-
 from .gradcam import (make_gradcam_heatmap, save_gradcam)
 
-model = tf.keras.models.load_model("model/penumonia1.keras")
-
-preprocess_input = tf.keras.applications.vgg16.preprocess_input
 
 
 
@@ -107,7 +104,12 @@ def compute_heatmap_statistics(
             float(np.mean(heatmap > 0.5) * 100)
     }
 
-def predict_xray(filepath):
+def predict_xray(filepath,model_config):
+    model = model_config["model"]
+    preprocess_input = model_config["preprocess"]
+    last_conv_layer_name = model_config["last_conv_layer"]
+    backbone_name = model_config["backbone"]
+    # gradcam_mode = model_config["gradcam_mode"]
     # Image preprocessing
     original = cv2.imread(filepath)
     
@@ -133,8 +135,8 @@ def predict_xray(filepath):
         confidence = (1 - float(prediction)) * 100
 
     # Make a heat map
-    heatmap = make_gradcam_heatmap(img_array, model)
-
+    heatmap = make_gradcam_heatmap(img_array, model, backbone_name, last_conv_layer_name)
+    print("Heatmap shape: ", heatmap.shape)
     gradcam_base = save_gradcam(original, heatmap)
 
     images = upload_image(filepath, gradcam_base)

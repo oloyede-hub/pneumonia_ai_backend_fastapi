@@ -7,8 +7,9 @@ import shutil
 import uuid
 import os
 from services.supabase_storage import check_connection
-
+from utils.load_model import load_model_config
 from services.predictor import predict_xray
+import tensorflow as tf
 
 load_dotenv()
 
@@ -16,6 +17,9 @@ load_dotenv()
 os.makedirs("static/gradcam",exist_ok=True)
 # Instantiating the fast api package
 app = FastAPI()
+
+
+model_config = load_model_config("resnet50")
 
 # Until cors middleware is added no response will be delivered to the browser
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])
@@ -36,9 +40,8 @@ def prediction(file: UploadFile = File(...)):
     # Write the new uploaded file into the new file
     with open(filepath, "wb") as buffer:
         buffer.write(file.file.read())
-
-
-    result = predict_xray(filepath)
+    
+    result = predict_xray(filepath, model_config)
 
     return result
 
