@@ -1,334 +1,92 @@
-from zipfile import Path
+"""Pneumonia-logit Grad-CAM without filesystem output."""
 
-import tensorflow as tf
-import numpy as np
 import cv2
-import uuid
-import base64
-from pathlib import Path
-
-
-
-# def make_gradcam_heatmap(
-#     img_array,
-#     model,
-#     backbone_name,
-#     last_conv_name
-# ):
-#     backbone = model.get_layer(backbone_name)
-
-#     last_conv = backbone.get_layer(
-#         last_conv_name
-#     )
-
-#     # Image -> block5_conv3
-#     # This create a new model
-#     conv_model = tf.keras.Model(
-#     inputs=backbone.input,
-#     outputs=last_conv.output
-#     )
-
-    
-
-#     # Build classifier head manually
-#     classifier_input = tf.keras.Input(
-#         shape=last_conv.output.shape[1:]
-#     )
-
-#     x = classifier_input
-
-#     passed_target = False
-
-#     for layer in backbone.layers:
-#         if passed_target:
-#             x = layer(x)
-
-#         if layer.name == last_conv_name:
-#             passed_target = True
-
-#     for layer in model.layers[1:]:
-#         x = layer(x)
-
-
-#     classifier_model = tf.keras.Model(
-#         classifier_input,
-#         x
-#     )
-
-
-#     with tf.GradientTape() as tape:
-
-#         conv_output = conv_model(img_array)
-
-#         tape.watch(conv_output)
-
-#         predictions = classifier_model(
-#             conv_output
-#         )
-
-#         class_channel = predictions[:, 0]
-
-#     grads = tape.gradient(
-#         class_channel,
-#         conv_output
-#     )
-
-#     pooled_grads = tf.reduce_mean(
-#         grads,
-#         axis=(0, 1, 2)
-#     )
-
-#     conv_output = conv_output[0]
-
-#     heatmap = tf.reduce_sum(
-#         conv_output * pooled_grads,
-#         axis=-1
-#     )
-
-#     heatmap = tf.maximum(
-#         heatmap,
-#         0
-#     )
-
-#     heatmap /= (
-#         tf.reduce_max(heatmap) + 1e-8
-#     )
-
-#     return heatmap.numpy()
-
-
-
-
-# def make_gradcam_heatmap(
-#     img_array,
-#     model,
-#     backbone_name,
-#     last_conv_name,
-# ):
-#     backbone = model.get_layer(backbone_name)
-
-
-#     last_conv = backbone.get_layer(last_conv_name)
-
-#     conv_model = tf.keras.Model(
-#         backbone.input,
-#         last_conv.output
-#     )
-
-#     classifier_input = tf.keras.Input(
-#         shape=last_conv.output.shape[1:]
-#     )
-
-#     x = classifier_input
-
-#     passed = False
-
-#     for layer in backbone.layers:
-
-#         if passed:
-#             x = layer(x)
-
-#         if layer.name == last_conv_name:
-#             passed = True
-
-#     for layer in model.layers[1:]:
-#         x = layer(x)
-
-#     classifier_model = tf.keras.Model(
-#         classifier_input,
-#         x
-#     )
-
-#     conv_model = tf.keras.Model(
-#         inputs=backbone.input,
-#         outputs=last_conv.output
-#     )
-
-#     classifier_input = tf.keras.Input(
-#         shape=last_conv.output.shape[1:]
-#     )
-
-#     x = classifier_input
-
-#     passed_target = False
-
-#     for layer in backbone.layers:
-
-#         if passed_target:
-#             x = layer(x)
-
-#         if layer.name == last_conv_name:
-#             passed_target = True
-
-#     for layer in model.layers[1:]:
-#         x = layer(x)
-
-#     classifier_model = tf.keras.Model(
-#         classifier_input,
-#         x
-#     )
-
-#     with tf.GradientTape() as tape:
-
-#         conv_output = conv_model(img_array)
-
-#         tape.watch(conv_output)
-
-#         predictions = classifier_model(
-#             conv_output
-#         )
-
-#         class_channel = predictions[:, 0]
-
-#     grads = tape.gradient(
-#         class_channel,
-#         conv_output
-#     )
-
-#     pooled_grads = tf.reduce_mean(
-#         grads,
-#         axis=(0, 1, 2)
-#     )
-
-#     conv_output = conv_output[0]
-
-#     heatmap = tf.reduce_sum(
-#         conv_output * pooled_grads,
-#         axis=-1
-#     )
-
-#     heatmap = tf.maximum(
-#         heatmap,
-#         0
-#     )
-
-#     heatmap /= (
-#         tf.reduce_max(heatmap) + 1e-8
-#     )
-
-#     return heatmap.numpy()
-
-
-def make_gradcam_heatmap(
-    img_array,
-    model,
-    backbone_name,
-    last_conv_name
-):
-    # 1. Extract the inner backbone (e.g., ResNet50 or VGG16) from the wrapper
-    backbone = model.get_layer(backbone_name)
-    last_conv_layer = backbone.get_layer(last_conv_name)
-
-    # 2. Build a sub-model *only* for the backbone up to the last conv layer
-    # This is safe and built directly from the backbone's fixed inputs
-    conv_model = tf.keras.Model(
-        inputs=backbone.inputs,
-        outputs=last_conv_layer.output
+import numpy as np
+import tensorflow as tf
+
+
+class GradCAM:
+    def __init__(self, model, backbone_name, last_conv_name):
+        backbone = model.get_layer(backbone_name)
+        target = backbone.get_layer(last_conv_name)
+        # backbone.input belongs to its internal graph. The inbound node holds
+        # the outer-model tensor, including saved preprocessing operations.
+        # Saved backbones may retain nodes from earlier training graphs. Only
+        # consider calls that participate in this classifier's active graph.
+        graph_model = getattr(model, "_functional", None) or model
+        graph_nodes = {
+            node for nodes in graph_model._nodes_by_depth.values() for node in nodes
+        }
+        backbone_nodes = [node for node in backbone._inbound_nodes if node in graph_nodes]
+        if len(backbone_nodes) != 1:
+            raise ValueError("Expected the backbone to be called exactly once.")
+        backbone_inputs = backbone_nodes[0].input_tensors
+        if len(backbone_inputs) != 1:
+            raise ValueError("Expected a single backbone input.")
+        self.prefix = tf.keras.Model(model.inputs[0], backbone_inputs[0])
+        self.features = tf.keras.Model(backbone.inputs[0], target.output)
+        # Preserve graph connections rather than replaying residual layers.
+        self.tail = (
+            tf.keras.layers.Identity()
+            if target.output is backbone.output
+            else tf.keras.Model(target.output, backbone.output)
+        )
+        layers = [
+            layer
+            for layer in model.layers
+            if not isinstance(layer, tf.keras.layers.InputLayer)
+        ]
+        backbone_index = layers.index(backbone)
+        self.output_layer = layers[-1]
+        if (
+            not isinstance(self.output_layer, tf.keras.layers.Dense)
+            or self.output_layer.units != 1
+            or self.output_layer.get_config()["activation"] != "sigmoid"
+        ):
+            raise ValueError("Grad-CAM requires a single Dense sigmoid output.")
+        self.head = (
+            tf.keras.Sequential(layers[backbone_index + 1:-1])
+            if len(layers) > backbone_index + 2
+            else tf.keras.layers.Identity()
+        )
+
+    def __call__(self, img_array):
+        inputs = tf.convert_to_tensor(img_array, dtype=tf.float32)
+        with tf.GradientTape() as tape:
+            prepared = self.prefix(inputs, training=False)
+            features = self.features(prepared, training=False)
+            tape.watch(features)
+            hidden = self.head(self.tail(features, training=False), training=False)
+            # Use the actual final-layer weights without mutating the loaded model.
+            logits = tf.linalg.matmul(hidden, self.output_layer.kernel)
+            if self.output_layer.use_bias:
+                logits = tf.nn.bias_add(logits, self.output_layer.bias)
+            predictions = self.output_layer.activation(logits)
+            probability = predictions[:, 0]
+            # Explain pneumonia evidence before sigmoid saturation destroys gradients.
+            score = logits[:, 0]
+        gradients = tape.gradient(score, features)
+        if gradients is None:
+            raise RuntimeError("Grad-CAM is disconnected from the classifier.")
+        weights = tf.reduce_mean(gradients, axis=(1, 2), keepdims=True)
+        heatmap = tf.nn.relu(tf.reduce_sum(features * weights, axis=-1))[0]
+        heatmap = tf.math.divide_no_nan(heatmap, tf.reduce_max(heatmap))
+        tf.debugging.assert_all_finite(predictions, "Non-finite prediction")
+        tf.debugging.assert_all_finite(heatmap, "Non-finite Grad-CAM")
+        return float(probability[0]), heatmap.numpy()
+
+
+def render_gradcam(original_image, heatmap, alpha=0.4):
+    """Resize scalar activation before coloring; zero activation stays unchanged."""
+    if not 0 <= alpha <= 1:
+        raise ValueError("alpha must be between zero and one")
+    height, width = original_image.shape[:2]
+    activation = cv2.resize(
+        np.asarray(heatmap, dtype=np.float32),
+        (width, height),
+        interpolation=cv2.INTER_LINEAR,
     )
-
-    # 3. Track the operations using GradientTape
-    with tf.GradientTape() as tape:
-        inputs = tf.cast(img_array, tf.float32)
-        
-        # Get the feature maps from the last conv layer
-        conv_outputs = conv_model(inputs)
-        tape.watch(conv_outputs)
-        
-        # 4. Extract the classifier head layers dynamically from your main model
-        # Find where the backbone sits in your global sequential model
-        backbone_idx = None
-        for idx, layer in enumerate(model.layers):
-            if layer.name == backbone_name:
-                backbone_idx = idx
-                break
-                
-        # Forward pass through the rest of the backbone after last_conv (if any)
-        # This handles downstream layers within the backbone wrapper itself
-        x = conv_outputs
-        passed_conv = False
-        for layer in backbone.layers:
-            if passed_conv:
-                x = layer(x)
-            if layer.name == last_conv_name:
-                passed_conv = True
-
-        # Forward pass through all layers following the backbone in the top-level model
-        if backbone_idx is not None:
-            for layer in model.layers[backbone_idx + 1:]:
-                x = layer(x)
-        else:
-            # Fallback if backbone structure differs
-            for layer in model.layers[1:]:
-                x = layer(x)
-                
-        predictions = x
-        
-        # 5. Automatically target the top predicted class channel
-        best_class_idx = tf.argmax(predictions[0])
-        class_channel = predictions[:, best_class_idx]
-
-    # 6. Extract gradients of the top class score w.r.t the feature maps
-    grads = tape.gradient(class_channel, conv_outputs)
-
-    # 7. Global average pool the gradients
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    # 8. Weight the feature maps by their gradient importances
-    # Extract index 0 to get the pure 2D feature dimensions
-    conv_outputs_0 = conv_outputs[0]
-    heatmap = tf.reduce_sum(conv_outputs_0 * pooled_grads, axis=-1)
-
-    # 9. Apply ReLU and normalize safely
-    heatmap = tf.maximum(heatmap, 0.0)
-    heatmap /= (tf.reduce_max(heatmap) + 1e-8)
-
-    print("Raw feature map shape:", conv_outputs[0].shape) 
-    # Max coordinates in 7x7 matrix
-    print("Max activation coordinate:", np.unravel_index(np.argmax(heatmap), heatmap.shape))
-
-    return heatmap.numpy()
-
-def save_gradcam(
-    original_image,
-    heatmap
-):
-    heatmap = np.uint8(
-        255 * heatmap
-    )
-
-    heatmap = cv2.applyColorMap(
-        heatmap,
-        cv2.COLORMAP_JET
-    )
-
-    heatmap = cv2.resize(
-        heatmap,
-        (
-            original_image.shape[1],
-            original_image.shape[0]
-        ),
-         interpolation=cv2.INTER_CUBIC
-    )
-
-    overlay = cv2.addWeighted(
-        original_image,
-        0.6,
-        heatmap,
-        0.4,
-        0
-    )
-
-    output_dir = Path("static") / "gradcam"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    filepath = output_dir / f"{uuid.uuid4()}.png"
-
-    cv2.imwrite(
-        filepath,
-        overlay
-    )
-
-    return filepath
-
-
-
+    activation = np.clip(np.nan_to_num(activation), 0, 1)
+    colors = cv2.applyColorMap(np.uint8(255 * activation), cv2.COLORMAP_JET)
+    opacity = (alpha * activation)[..., None]
+    return np.rint(original_image * (1 - opacity) + colors * opacity).astype(np.uint8)

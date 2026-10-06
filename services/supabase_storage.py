@@ -1,28 +1,13 @@
-import os
+﻿import os
+from functools import lru_cache
 
-# I will test to remove you later
-from dotenv import load_dotenv
-from supabase import create_client, Client
-
-load_dotenv()
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
-
-if not SUPABASE_URL:
-        raise RuntimeError("SUPABASE_URL is not set in the environment variables.")
-if not SUPABASE_SECRET_KEY:
-    raise RuntimeError("SUPABASE_SECRET_KEY is not set in the environment variables.")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+from supabase import create_client
 
 
-def check_connection():
-      try:
-            buckets = supabase.storage.from_("uploads")
-            print("Connection successful. Buckets:", buckets)
-            return True
-      except Exception as e:
-        print("Connection failed:", str(e))
-        return False
-
+@lru_cache(maxsize=1)
+def get_supabase():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SECRET_KEY")
+    if not url or not key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SECRET_KEY must be configured.")
+    return create_client(url, key)

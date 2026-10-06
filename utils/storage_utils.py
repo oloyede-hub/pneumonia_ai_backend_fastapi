@@ -1,52 +1,37 @@
+﻿import logging
 import os
 import uuid
-from pathlib import Path
-from services.supabase_storage import supabase
+
+from services.supabase_storage import get_supabase
+
+logger = logging.getLogger(__name__)
 
 
-BUCKET_NAME = "uploads"
+class StorageError(RuntimeError):
+    pass
 
 
-
-def get_public_url(storage_path: str):
-    return (
-        supabase
-        .storage
-        .from_(BUCKET_NAME)
-        .get_public_url(storage_path)
-    )
-
-
-
-def upload_file(local_file_path: str, destination_path: str = ""):
-
-    with open(local_file_path, "rb") as file:
-        supabase.storage.from_(BUCKET_NAME).upload(
-            path=destination_path,
-            file=file,
-            file_options={
-                "upsert": "false"
-            }
-        )
-
-    return supabase.storage.from_(BUCKET_NAME).get_public_url(destination_path)
-
-
-def upload_image(filepath, gradcam_base):
-    # Generate a unique ID for the image
-    image_id = str(uuid.uuid4())
-
-    # Define storage paths
-    original_storage_path = f"originals/{image_id}.jpg"
-    overlay_storage_path = f"gradcam/{image_id}.png"
-
-    # Upload the original image
-    original_url = upload_file(filepath, original_storage_path)
-
-    # Upload the gradcam image
-    gradcam_url = upload_file(gradcam_base, overlay_storage_path)
-
-    return {
-        "original_url": original_url,
-        "gradcam_url": gradcam_url
-    }
+def upload_image(original_bytes: bytes, overlay_bytes: bytes):
+    image_id = uuid.uuid4().hex
+    paths = [f"originals/{image_id}.png", f"gradcam/{image_id}.png"]
+    uploaded = []
+    try:
+        bucket = get_supabase().storage.from_(os.getenv("SUPABASE_BUCKET", "uploads"))
+        for path, data in zip(paths, (original_bytes, overlay_bytes)):
+            bucket.upload(
+                path=path,
+                file=data,
+                file_options={"content-type": "image/png", "upsert": "false"},
+            )
+            uploaded.append(path)
+        return {
+            "original_url": bucket.get_public_url(paths[0]),
+            "gradcam_url": bucket.get_public_url(paths[1]),
+        }
+    except Exception as exc:
+        if uploaded:
+            try:
+                bucket.remove(uploaded)
+            except Exception:
+                logger.exception("Failed to clean up incomplete image upload")
+        raise StorageError("Image storage is temporarily unavailable.") from exc

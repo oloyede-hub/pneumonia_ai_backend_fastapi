@@ -1,300 +1,64 @@
-# 🫁 Pneumonia Detection Backend API
+# Pneumonia Detection Backend
 
-A FastAPI backend that powers an AI-driven chest X-ray pneumonia detection application. The API performs image preprocessing, deep learning inference using a TensorFlow/Keras model, generates Grad-CAM visualizations for explainability, and stores uploaded images securely using Supabase Storage.
+FastAPI backend for binary chest X-ray classification with a pneumonia-evidence Grad-CAM overlay and Supabase image storage.
 
-The backend is designed to work with a Next.js frontend, providing prediction results, confidence scores, explainable AI outputs, and image assets through a clean REST API.
+## Run
 
----
+Use Python with the packages in requirements.txt:
 
-## ✨ Features
-
-* FastAPI REST API
-* TensorFlow/Keras model inference
-* Chest X-ray preprocessing with OpenCV
-* Binary classification (Normal vs Pneumonia)
-* Grad-CAM heatmap generation
-* Explainable AI (XAI) metadata
-* Heatmap statistics and activation analysis
-* Supabase Storage integration
-* CORS support for frontend applications
-* JSON API responses
-
----
-
-## 🧠 Explainable AI
-
-Beyond predicting whether pneumonia is present, the API explains the model's decision using Grad-CAM.
-
-For every prediction, the backend generates:
-
-* Prediction label
-* Confidence score
-* Class probabilities
-* Grad-CAM overlay image
-* Raw Grad-CAM heatmap
-* Interpolated heatmap surface
-* Top activation regions
-* Heatmap statistics
-
-This enables downstream applications to visualize and interpret the model's reasoning.
-
----
-
-## 🏗️ Tech Stack
-
-### Framework
-
-* FastAPI
-* Uvicorn
-
-### Machine Learning
-
-* TensorFlow / Keras
-* VGG16 Transfer Learning
-* Grad-CAM
-
-### Image Processing
-
-* OpenCV
-* NumPy
-
-### Cloud Storage
-
-* Supabase Storage
-
-### Other
-
-* Python
-* python-dotenv
-
----
-
-## 📁 Project Structure
-
-```text
-backend/
-│
-├── model/
-│   └── pneumonia.keras
-│
-├── routes/
-│
-├── services/
-│   ├── predictor.py
-│   ├── gradcam.py
-│   └── supabase_storage.py
-│
-├── utils/
-│   └── storage_utils.py
-│
-├── uploads/
-│
-├── static/
-│
-├── main.py
-├── requirements.txt
-└── .env
-```
-
----
-
-## 🚀 Installation
-
-Clone the repository:
-
-```bash
-git clone https://github.com/oloyede-hub/pneumonia_backend.git
-```
-
-Navigate into the project:
-
-```bash
-cd pneumonia-backend
-```
-
-Create a virtual environment:
-
-```bash
-python -m venv .venv
-```
-
-Activate it:
-
-### Windows
-
-```bash
-.venv\Scripts\activate
-```
-
-### macOS/Linux
-
-```bash
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
+```sh
 pip install -r requirements.txt
+uvicorn main:app --host localhost --port 7000
 ```
 
-Run the API:
+Configure .env with SUPABASE_URL and SUPABASE_SECRET_KEY. SUPABASE_BUCKET is optional and defaults to uploads. The existing public-URL response requires a bucket configured for public reads. Credentials stay on the server.
 
-```bash
-uvicorn main:app --reload
-```
+ResNet50 is selected by default. Set MODEL_NAME=resnet50 explicitly in .env, or MODEL_NAME=vgg16 to select VGG16. ResNet50 downloads resnet50_shortcut_aware_final.keras from Buore/RESNET50-CHEST-CLASSIFIER; VGG16 downloads near_final__vgg16_pneumonia.keras from Buore/VGG16-CHEST-CLASSIFIER. Hugging Face caches the downloaded model.
 
-The API will be available at:
+Switch architectures by changing MODEL_NAME in .env and restarting the backend. The model is selected once at startup; changing the file while the server is running does not reload the model.
 
-```text
-http://localhost:8000
-```
+Image dimensions come from the saved model input. The published ResNet50 model already embeds RGB-to-BGR conversion and ImageNet channel mean subtraction, so the backend supplies raw RGB float32 pixels in the 0–255 range. Do not additionally call preprocess_input or divide by 255. VGG16 uses external Keras VGG16 preprocessing. These settings are specific to the configured model files and must be rechecked when replacing weights. ResNet50 Grad-CAM targets conv5_block3_out and preserves both the embedded preprocessing and residual graph connections.
 
-Interactive API documentation:
+GET /ping returns {"ping":"pong"}. POST /predict accepts a multipart file field. Interactive API documentation is at /docs.
 
-```text
-http://localhost:8000/docs
-```
+## Image handling
 
----
+Requests, decoded images, and overlays stay in memory. Neither uploads/ nor static/gradcam/ is created or written, and multipart files below the request limit do not spill to disk. Existing files in those directories are left untouched.
 
-## ⚙️ Environment Variables
+The limit is 10 MiB for the whole multipart request (including headers/boundaries), and 20 megapixels for decoded images. JPEG, PNG and WebP are accepted. Images are oriented using EXIF before both inference and rendering, then uploaded directly as lossless PNG bytes with matching MIME types. The original upload is normalized to RGB and metadata is discarded. Supabase still stores both images remotely. A failed second upload triggers best-effort removal of the first.
 
-Create a `.env` file with the following values:
-
-```env
-SUPABASE_URL=your_supabase_url
-SUPABASE_SECRET_KEY=your_supabase_service_role_key
-```
-
----
-
-## 📡 API Response
-
-Example prediction response:
+The response preserves the existing frontend contract:
 
 ```json
 {
   "prediction": {
     "label": "Pneumonia",
-    "confidence": 99.98,
-    "probability": {
-      "Normal": 0.0002,
-      "Pneumonia": 0.9998
-    }
+    "confidence": 90.0,
+    "probability": {"Normal": 0.1, "Pneumonia": 0.9}
   },
-  "images": {
-    "original_url": "...",
-    "gradcam_url": "..."
-  },
-  "gradcam": {
-    "surface": {
-      "width": 224,
-      "height": 224,
-      "values": []
-    },
-    "raw": {
-      "width": 14,
-      "height": 14,
-      "values": []
-    },
-    "analysis": {
-      "threshold": 0.6,
-      "activatedPercentage": 3.57,
-      "topActivations": []
-    },
-    "statistics": {
-      "maxActivation": 0.99,
-      "minActivation": 0.0,
-      "meanActivation": 0.09,
-      "stdActivation": 0.17
-    }
-  }
+  "images": {"original_url": "...", "gradcam_url": "..."}
 }
 ```
 
----
+Invalid images return 400, oversized requests 413, unsupported request types 415, missing file fields 422, and storage failures 502.
 
-## 🔄 Backend Workflow
+## Grad-CAM and performance
 
-```text
-Client Upload
-      │
-      ▼
-FastAPI Endpoint
-      │
-      ▼
-Image Preprocessing
-(OpenCV)
-      │
-      ▼
-TensorFlow Model
-      │
-      ▼
-Prediction
-      │
-      ├────────► Probability Scores
-      │
-      ├────────► Grad-CAM Generation
-      │
-      ├────────► Heatmap Analysis
-      │
-      └────────► Upload Images to Supabase Storage
-                     │
-                     ▼
-              JSON Response
+The explanation targets the pneumonia score before sigmoid (the logit), avoiding zero gradients when a confident probability rounds to 1. The original model and its prediction probabilities are unchanged. Normal predictions return the uncolored image in gradcam_url for compatibility; they do not display a pneumonia overlay. The gradcam metadata reports target, available, status (available, not_applicable, or no_positive_activation), and lung_localization_validated=false. A positive prediction without positive spatial activation also returns the uncolored image and explicitly reports the unavailable explanation. Inference uses training=False, with one shared forward pass for prediction and gradients. The feature and classifier graphs are built once on startup, and a consistency check compares their prediction with the loaded model. A lock serializes model inference within each worker.
+
+Scalar heatmaps are resized to the same oriented image coordinates before applying the colormap. Opacity follows activation, so zero-activation pixels keep their original appearance. All-zero maps remain finite.
+
+Grad-CAM shows model evidence; it is not lung segmentation. Persistent armpit activation can indicate learned shortcuts, a preprocessing mismatch with training, or coarse localization. This implementation does not shift or mask activations to simulate lung localization. Confirm the training preprocessing and class mapping (sigmoid output is assumed to mean Pneumonia), and evaluate representative X-rays with lung annotations before claiming localization accuracy. No training data, lung segmentation weights, or clinical localization benchmark is included here.
+
+The supported architecture has a single call to a nested backbone, optional input preprocessing, and a sequential classifier head ending in a single Dense sigmoid output. The configured VGG16 and ResNet50 target layers must have a connected graph tail. Changing model architecture requires rechecking these assumptions. Startup compares Grad-CAM predictions against direct model inference on black and deterministic random images.
+
+## Tests
+
+```sh
+python -m unittest discover -s tests -v
 ```
 
----
+Tests cover pneumonia targeting, sigmoid saturation, normal-overlay suppression, prediction consistency, zero-gradient maps, overlay geometry, image validation, multipart memory behavior and limits, and remote-upload rollback. Storage tests use mocks and do not send images remotely.
 
-## 📊 Model Performance
-
-| Metric    | Score |
-| --------- | ----: |
-| Accuracy  | 93.1% |
-| Precision |   93% |
-| Recall    |   96% |
-| F1 Score  |   95% |
-| ROC AUC   | 0.978 |
-
----
-
-## 🔮 Future Improvements
-
-* Multi-class thoracic disease detection
-* DICOM image support
-* ONNX/TensorRT model optimization
-* Batch image inference
-* Authentication and authorization
-* Prediction history
-* PDF diagnostic reports
-* Docker deployment
-* Automated testing
-* CI/CD pipeline
-
----
-
-## 🤝 Frontend
-
-This backend is designed to work with a Next.js frontend that provides:
-
-* Chest X-ray upload
-* Prediction dashboard
-* Grad-CAM overlay visualization
-* Interactive 3D activation surface
-* Activation statistics
-* Explainable AI interface
-
----
-
-## 👨‍💻 Author
-
-**Sodiq Oloyede**
-
-* GitHub: https://github.com/oloyede-hub
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License. See the `LICENSE` file for more information.
+Grad-CAM reference: https://keras.io/examples/vision/grad_cam/
+Supabase upload reference: https://supabase.com/docs/reference/python/storage-from-upload

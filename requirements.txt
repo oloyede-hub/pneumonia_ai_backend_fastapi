@@ -1,11 +1,10 @@
-tensorflow
+﻿tensorflow
 fastapi
 uvicorn
 python-multipart
 pillow
-tensorflow-serving-api
-matplotlib
 numpy
 python-dotenv
-#cv2
-uuid
+opencv-python-headless
+supabase
+huggingface-hub

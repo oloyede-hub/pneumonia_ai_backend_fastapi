@@ -1,162 +1,81 @@
-# from huggingface_hub import hf_hub_download
-import os
-import uuid
+"""Decode, infer and upload entirely in memory."""
+
+from io import BytesIO
+import warnings
 
 import cv2
 import numpy as np
-import tensorflow as tf
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-from utils.storage_utils import upload_file, upload_image
+from utils.storage_utils import upload_image
+from .gradcam import render_gradcam
 
-from .gradcam import (make_gradcam_heatmap, save_gradcam)
-
-
-
-
-def analyze_heatmap(
-    heatmap: np.ndarray,
-    threshold: float = 0.6,
-    top_k: int = 5
-):
-    # Pixels above threshold
-    mask = heatmap >= threshold
-
-    activated_pixels = int(np.sum(mask))
-    total_pixels = heatmap.size
-
-    activated_percentage = (
-        activated_pixels / total_pixels
-    ) * 100
-
-    # Get indices of highest activations
-    flat_indices = np.argsort(
-        heatmap.ravel()
-    )[::-1][:top_k]
-
-    top_activations = []
-
-    for idx in flat_indices:
-        y, x = np.unravel_index(
-            idx,
-            heatmap.shape
-        )
-
-        top_activations.append({
-            "x": int(x),
-            "y": int(y),
-            "activation": float(
-                heatmap[y, x]
-            )
-        })
-
-    return {
-        "threshold": threshold,
-        "activatedPercentage": round(
-            activated_percentage,
-            2
-        ),
-        "topActivations": top_activations
-    }
+MAX_IMAGE_PIXELS = 20_000_000
 
 
-def build_gradcam_response(
-    heatmap: np.ndarray,
-):
-    heatmap_224 = cv2.resize(
-        heatmap,
-        (224, 224),
-        interpolation=cv2.INTER_CUBIC
+class InvalidImage(ValueError):
+    pass
+
+
+def decode_image(data):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as image:
+                if image.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise InvalidImage("Use a JPEG, PNG or WebP image.")
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    raise InvalidImage("Image exceeds the 20 megapixel limit.")
+                return np.array(ImageOps.exif_transpose(image).convert("RGB"))
+    except (
+        UnidentifiedImageError,
+        OSError,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+    ) as exc:
+        raise InvalidImage("Invalid or oversized image.") from exc
+
+
+def encode_png(image):
+    ok, encoded = cv2.imencode(".png", image, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+    if not ok:
+        raise RuntimeError("Image encoding failed.")
+    return encoded.tobytes()
+
+
+def predict_xray(image_bytes, model_config):
+    rgb = decode_image(image_bytes)
+    height, width = model_config.get("input_size", (224, 224))
+    resized = cv2.resize(rgb, (width, height))
+    batch = model_config["preprocess"](resized[None].astype(np.float32))
+    with model_config["inference_lock"]:
+        prediction, heatmap = model_config["gradcam"](batch)
+    label = "Pneumonia" if prediction >= 0.5 else "Normal"
+    confidence = prediction if prediction >= 0.5 else 1 - prediction
+    original = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    has_activation = bool(np.any(heatmap > 0))
+    available = prediction >= 0.5 and has_activation
+    overlay = render_gradcam(original, heatmap) if available else original
+    status = (
+        "available"
+        if available
+        else "not_applicable" if prediction < 0.5 else "no_positive_activation"
     )
-
-    analysis = analyze_heatmap(
-        heatmap
-    )
-
-
+    images = upload_image(encode_png(original), encode_png(overlay))
     return {
-        "surface": {
-            "width": heatmap_224.shape[1],
-            "height": heatmap_224.shape[0],
-            "values": heatmap_224.tolist()
-        },
-        "raw":{
-            "width": heatmap.shape[1],
-            "height": heatmap.shape[0],
-            "values": heatmap.tolist(),
-        },
-        "analysis": analysis,
-        "statistics": {
-                "maxActivation": float(np.max(heatmap)),
-                "minActivation": float(np.min(heatmap)),
-                "meanActivation": float(np.mean(heatmap)),
-                "stdActivation": float(np.std(heatmap))
+        "prediction": {
+            "label": label,
+            "confidence": confidence * 100,
+            "probability": {
+                "Normal": round(1 - prediction, 4),
+                "Pneumonia": round(prediction, 4),
             },
+        },
+        "images": images,
+        "gradcam": {
+            "target": "Pneumonia",
+            "available": available,
+            "status": status,
+            "lung_localization_validated": False,
+        },
     }
-
-def compute_heatmap_statistics(
-    heatmap: np.ndarray
-):
-    return {
-        "maxActivation": float(np.max(heatmap)),
-        "meanActivation": float(np.mean(heatmap)),
-        "activatedPixels": int(np.sum(heatmap > 0.5)),
-        "activatedPercentage":
-            float(np.mean(heatmap > 0.5) * 100)
-    }
-
-def predict_xray(filepath,model_config):
-    model = model_config["model"]
-    preprocess_input = model_config["preprocess"]
-    last_conv_layer_name = model_config["last_conv_layer"]
-    backbone_name = model_config["backbone"]
-    # gradcam_mode = model_config["gradcam_mode"]
-    # Image preprocessing
-    original = cv2.imread(filepath)
-    
-
-    rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
-
-    resized = cv2.resize(rgb, (224, 224))
-
-    img_array = np.expand_dims(resized, axis=0)
-
-    img_array = preprocess_input(img_array.astype(np.float32))
-
-    # Pass the image to the model
-    prediction = float(model.predict(img_array, verbose=0)[0][0])
-
-
-    # Predictiion to return a norma
-    if prediction >= 0.5:
-        label = "Pneumonia"
-        confidence = float(prediction) * 100
-    else:
-        label = "Normal"
-        confidence = (1 - float(prediction)) * 100
-
-    # Make a heat map
-    heatmap = make_gradcam_heatmap(img_array, model, backbone_name, last_conv_layer_name)
-    print("Heatmap shape: ", heatmap.shape)
-    gradcam_base = save_gradcam(original, heatmap)
-
-    images = upload_image(filepath, gradcam_base)
-
-    os.remove(filepath)
-    os.remove(gradcam_base)
-    gradcam = build_gradcam_response(
-        heatmap
-    )
-
-    return  {
-    "prediction": {
-        "label": label,
-        "confidence": confidence,
-        "probability": {
-            "Normal": round(1 - prediction, 4),
-            "Pneumonia": round(prediction, 4),
-        }
-    },
-    "images": images,
-    "gradcam": gradcam
-    }
-

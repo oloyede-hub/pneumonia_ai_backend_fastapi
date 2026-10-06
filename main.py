@@ -1,54 +1,107 @@
-from fastapi import FastAPI, File, UploadFile
+﻿from contextlib import asynccontextmanager
+import logging
+
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 import uvicorn
 
-import shutil
-import uuid
-import os
-from services.supabase_storage import check_connection
+from services.predictor import InvalidImage, predict_xray
+from services.supabase_storage import get_supabase
 from utils.load_model import load_model_config
-from services.predictor import predict_xray
-import tensorflow as tf
+from utils.storage_utils import StorageError
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+MAX_REQUEST_BYTES = 10 * 1024 * 1024
 
 
-os.makedirs("static/gradcam",exist_ok=True)
-# Instantiating the fast api package
-app = FastAPI()
+class MemoryMultipartParser(MultiPartParser):
+    # Support Starlette versions before and after the attribute rename.
+    spool_max_size = MAX_REQUEST_BYTES + 1
+    max_file_size = MAX_REQUEST_BYTES + 1
 
 
-model_config = load_model_config("resnet50")
+@asynccontextmanager
+async def lifespan(app):
+    get_supabase()
+    app.state.model_config = await run_in_threadpool(load_model_config, "vgg16")
+    yield
 
-# Until cors middleware is added no response will be delivered to the browser
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])
+
+
 @app.get("/ping")
 def ping():
     return {"ping": "pong"}
 
 
-@app.post("/predict")
-def prediction(file: UploadFile = File(...)):
-    # Rename the file and create a folder
-    filename = f"{uuid.uuid4()}_{file.filename}"
+@app.post(
+    "/predict",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {"file": {"type": "string", "format": "binary"}},
+                    }
+                }
+            },
+        }
+    },
+)
+async def prediction(request: Request):
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "multipart/form-data"
+    ):
+        raise HTTPException(415, "Use multipart/form-data with a file field.")
+    too_large = False
 
-    filepath = f"uploads/{filename}"
+    async def limited_stream():
+        nonlocal too_large
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > MAX_REQUEST_BYTES:
+                too_large = True
+                raise MultiPartException("Upload exceeds the 10 MiB request limit.")
+            yield chunk
 
-    os.makedirs("uploads", exist_ok=True)
+    parser = MemoryMultipartParser(
+        request.headers, limited_stream(), max_files=1, max_fields=0
+    )
+    try:
+        form = await parser.parse()
+    except MultiPartException as exc:
+        raise HTTPException(413 if too_large else 400, str(exc)) from exc
+    try:
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise HTTPException(422, "A file field is required.")
+        data = await file.read()
+    finally:
+        await form.close()
+    if not data:
+        raise HTTPException(400, "Image is empty.")
+    try:
+        return await run_in_threadpool(
+            predict_xray, data, request.app.state.model_config
+        )
+    except InvalidImage as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except StorageError as exc:
+        logger.exception("Image upload failed")
+        raise HTTPException(502, str(exc)) from exc
 
-    # Write the new uploaded file into the new file
-    with open(filepath, "wb") as buffer:
-        buffer.write(file.file.read())
-    
-    result = predict_xray(filepath, model_config)
 
-    return result
-
-
-check_connection()
-
-
-if __name__ == '__main__':
-    # Run the server with uvicorn
+if __name__ == "__main__":
     uvicorn.run("main:app", host="localhost", port=7000, reload=True)
